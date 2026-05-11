@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mythic - Battle & Chat</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/9.22.1/firebase-app.js";
+        import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/9.22.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, getDoc, updateDoc, collection, query, where, onSnapshot, addDoc, serverTimestamp, arrayUnion, orderBy, limit } from "https://www.gstatic.com/firebasejs/9.22[...]
+        
+        // User's Firebase Config
+        const firebaseConfig = {
+            apiKey: "AIzaSyAoRInsDwLb96T0EQMgryuMvclYRc18_4o",
+            authDomain: "mythic-36b09.firebaseapp.com",
+            projectId: "mythic-36b09",
+            storageBucket: "mythic-36b09.firebasestorage.app",
+            messagingSenderId: "777851047386",
+            appId: "1:777851047386:web:44d10f6b5246e8d9f904e3"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+
+        // --- Game Data Generation ---
+        const MONSTER_PREFIXES = ["Flame", "Frost", "Shadow", "Thunder", "Void", "Iron", "Storm", "Mystic", "Ancient", "Cyber", "Spectral", "Divine", "Fallen", "Primal", "Cursed"];
+        const MONSTER_NOUNS = ["Dragon", "Knight", "Golem", "Wraith", "Beast", "Titan", "Spirit", "Warrior", "Sentinel", "Reaper", "Serpent", "Phoenix", "Ogre", "Chimera", "Lich"];
+        const DOMAIN_PREFIXES = ["Infinite", "Eternal", "Abyssal", "Celestial", "Silent", "Shattered", "Burning", "Frozen", "Golden", "Dark", "Radiant", "Chaotic", "Hollow", "Sacred", "Malevolent"];
+        const DOMAIN_SUFFIXES = ["Void", "Palace", "Garden", "Prison", "Library", "Temple", "Forest", "Ocean", "Desert", "Graveyard", "Castle", "Shrine", "Domain", "Horizon", "Sanctum"];
+        const RARITY_TIERS = [
+            { name: "Common", color: "gray", mult: 1 },
+            { name: "Rare", color: "blue", mult: 1.5 },
+            { name: "Epic", color: "purple", mult: 2 },
+            { name: "Legendary", color: "yellow", mult: 3 }
+        ];
+
+        // Anime character tags for variety
+        const ANIME_TAGS = ["anime", "manga", "character", "demon", "spirit", "warrior", "mage", "beast", "dragon", "fantasy"];
+
+        function getRarityFromSeed(seed) {
+            const roll = seed % 100;
+            if (roll < 60) return 0; // Common
+            if (roll < 85) return 1; // Rare
+            if (roll < 98) return 2; // Epic
+            return 3; // Legendary
+        }
+
+        function generateMonster(id) {
+            const seed = id * 12345;
+            const rarityIdx = getRarityFromSeed(seed);
+            const rarity = RARITY_TIERS[rarityIdx];
+            const prefix = MONSTER_PREFIXES[seed % MONSTER_PREFIXES.length];
+            const noun = MONSTER_NOUNS[(seed >> 2) % MONSTER_NOUNS.length];
+            const name = `${prefix} ${noun}`;
+            const type = (seed % 10) > 3 ? "attack" : "spell";
+            const baseAtk = 500 + (seed % 2501);
+            const baseHp = 1000 + (seed % 4001);
+            
+            // Use anime API for better images
+            const animeTag = ANIME_TAGS[seed % ANIME_TAGS.length];
+            const image = `https://api.waifu.pics/random/safe?tag=${animeTag}`;
+            
+            return {
+                id,
+                name,
+                type,
+                rarity: rarity.name,
+                rarityIdx,
+                atk: Math.floor(baseAtk * rarity.mult),
+                hp: Math.floor(baseHp * rarity.mult),
+                ability: type === "attack" ? `Boosts ${prefix} types by 20%.` : `Heals 500 HP on summon.`,
+                image: image,
+                price: Math.floor((50 + baseAtk + baseHp) * rarity.mult)
+            };
+        }
+
+        function generateDomain(id) {
+            const seed = id * 54321;
+            const prefix = DOMAIN_PREFIXES[seed % DOMAIN_PREFIXES.length];
+            const suffix = DOMAIN_SUFFIXES[(seed >> 2) % DOMAIN_SUFFIXES.length];
+            const name = `${prefix} ${suffix}`;
+            return {
+                id,
+                name,
+                effect: `Increases all stats by ${(seed % 91) + 10}% for 3 turns.`
+            };
+        }
+
+        // --- UI State Management ---
+        const screens = ['auth-screen', 'lobby-screen', 'chat-screen', 'battle-screen', 'shop-screen', 'inventory-screen', 'leaderboard-screen'];
+        function showScreen(screenId) {
+            screens.forEach(id => {
+                document.getElementById(id).classList.toggle('hidden', id !== screenId);
+            });
+        }
+
+        // --- Core Logic ---
+        window.appState = {
+            user: null,
+            profile: null,
+            currentChat: null,
+            currentBattle: null
+        };
+
+        // --- Authentication ---
+        const btnLogin = document.getElementById('btn-login');
+        const btnSignup = document.getElementById('btn-signup');
+        const btnLogout = document.getElementById('btn-logout');
+        const emailInput = document.getElementById('auth-email');
+        const passInput = document.getElementById('auth-password');
+
+        btnSignup.onclick = async () => {
+            const email = emailInput.value.trim();
+            const password = passInput.value.trim();
+            
+            if (!email || !password) {
+                alert("Please enter both email and password");
+                return;
+            }
+            
+            if (password.length < 6) {
+                alert("Password must be at least 6 characters");
+                return;
+            }
+            
+            if (!email.includes('@')) {
+                alert("Please enter a valid email");
+                return;
+            }
+
+            btnSignup.disabled = true;
+            btnSignup.innerText = "Creating Account...";
+
+            try {
+                console.log("Creating user with email:", email);
+                const res = await createUserWithEmailAndPassword(auth, email, password);
+                console.log("User created:", res.user.uid);
+                
+                const domainId = Math.floor(Math.random() * 1000) + 1;
+                const domain = generateDomain(domainId);
+                const initialMonsters = [
+                    Math.floor(Math.random() * 500) + 1,
+                    Math.floor(Math.random() * 500) + 1,
+                    Math.floor(Math.random() * 500) + 1
+                ];
+                
+                console.log("Writing user profile to Firestore...");
+                await setDoc(doc(db, "users", res.user.uid), {
+                    uid: res.user.uid,
+                    username: email.split('@')[0],
+                    level: 1,
+                    wins: 0,
+                    money: 5000,
+                    domain: domain,
+                    inventory: initialMonsters,
+                    lastDomainUse: 0,
+                    lastDailyReward: 0,
+                    createdAt: Date.now()
+                });
+                
+                console.log("Account created successfully!");
+                alert("Account created! You're now logged in.");
+                emailInput.value = "";
+                passInput.value = "";
+            } catch (e) { 
+                console.error("Signup error:", e);
+                alert("Error: " + e.message);
+            } finally {
+                btnSignup.disabled = false;
+                btnSignup.innerText = "Sign Up";
+            }
+        };
+
+        btnLogin.onclick = async () => {
+            const email = emailInput.value.trim();
+            const password = passInput.value.trim();
+            
+            if (!email || !password) {
+                alert("Please enter both email and password");
+                return;
+            }
+
+            btnLogin.disabled = true;
+            btnLogin.innerText = "Logging in...";
+
+            try {
+                console.log("Logging in with email:", email);
+                await signInWithEmailAndPassword(auth, email, password);
+                emailInput.value = "";
+                passInput.value = "";
+            } catch (e) { 
+                console.error("Login error:", e);
+                alert("Error: " + e.message);
+            } finally {
+                btnLogin.disabled = false;
+                btnLogin.innerText = "Login";
+            }
+        };
+
+        btnLogout.onclick = () => signOut(auth);
+
+        onAuthStateChanged(auth, async (user) => {
+            if (user) {
+                console.log("User logged in:", user.uid);
+                window.appState.user = user;
+                try {
+                    const snap = await getDoc(doc(db, "users", user.uid));
+                    if (snap.exists()) {
+                        window.appState.profile = snap.data();
+                        checkDailyReward();
+                        updateLobbyUI();
+                        showScreen('lobby-screen');
+                        listenForMessages();
+                    } else {
+                        alert("User profile not found. Please sign up.");
+                        await signOut(auth);
+                    }
+                } catch (e) {
+                    console.error("Profile error:", e);
+                    alert("Error loading profile: " + e.message);
+                    await signOut(auth);
+                }
+            } else {
+                console.log("No user logged in");
+                showScreen('auth-screen');
+            }
+        });
+
+        // --- Daily Reward ---
+        async function checkDailyReward() {
+            const now = Date.now();
+            const lastReward = window.appState.profile.lastDailyReward || 0;
+            const dayInMs = 24 * 60 * 60 * 1000;
+            
+            if (now - lastReward > dayInMs) {
+                const reward = 500;
+                await updateDoc(doc(db, "users", auth.currentUser.uid), {
+                    money: window.appState.profile.money + reward,
+                    lastDailyReward: now
+                });
+                window.appState.profile.money += reward;
+                alert(`🎁 Daily Reward! +${reward} coins`);
+                updateLobbyUI();
+            }
+        }
+
+        function updateLobbyUI() {
+            const p = window.appState.profile;
+            if (!p) return;
+            document.getElementById('player-name').innerText = p.username;
+            document.getElementById('p-level').innerText = p.level;
+            document.getElementById('p-money').innerText = p.money;
+            document.getElementById('p-domain').innerText = p.domain.name;
+            document.getElementById('p-wins').innerText = p.wins || 0;
+        }
+
+        // --- SHOP SYSTEM ---
+        const SHOP_INVENTORY_SIZE = 12;
+        let shopMonsters = [];
+
+        function generateShopInventory() {
+            shopMonsters = [];
+            for (let i = 0; i < SHOP_INVENTORY_SIZE; i++) {
+                const monsterId = Math.floor(Math.random() * 2000) + 1;
+                shopMonsters.push(generateMonster(monsterId));
+            }
+        }
+
+        function openShop() {
+            generateShopInventory();
+            renderShop();
+            showScreen('shop-screen');
+        }
+
+        function renderShop() {
+            const shopGrid = document.getElementById('shop-grid');
+            const shopMoney = document.getElementById('shop-money');
+            shopMoney.innerText = window.appState.profile.money;
+            shopGrid.innerHTML = "";
+            
+            shopMonsters.forEach((monster, idx) => {
+                const div = document.createElement('div');
+                const rarityColor = RARITY_TIERS[monster.rarityIdx].color;
+                const canAfford = window.appState.profile.money >= monster.price;
+                
+                div.className = `bg-gray-800 border-2 border-${rarityColor}-500 rounded p-3 cursor-pointer hover:scale-105 transition`;
+                div.innerHTML = `
+                    <img src="${monster.image}" class="w-full h-24 object-cover rounded mb-2" onerror="this.src='https://via.placeholder.com/200/1a1a2e/00ffff?text=${encodeURIComponent(monster.name)}'">
+                    <div class="font-bold text-sm truncate">${monster.name}</div>
+                    <div class="text-xs text-${rarityColor}-300 font-bold">${monster.rarity}</div>
+                    <div class="text-xs mt-1">ATK: ${monster.atk}</div>
+                    <div class="text-xs">HP: ${monster.hp}</div>
+                    <div class="bg-yellow-700 px-2 py-1 rounded text-xs font-bold text-center my-2">💰 $${monster.price}</div>
+                    <button class="w-full ${canAfford ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-600 cursor-not-allowed'} px-2 py-1 rounded text-xs font-bold">
+                        ${canAfford ? 'BUY' : 'NO $'}
+                    </button>
+                `;
+                
+                if (canAfford) {
+                    div.onclick = () => buyMonster(monster, idx);
+                }
+                shopGrid.appendChild(div);
+            });
+        }
+
+        async function buyMonster(monster, idx) {
+            const p = window.appState.profile;
+            if (p.money < monster.price) {
+                alert("Not enough money!");
+                return;
+            }
+            
+            const newMoney = p.money - monster.price;
+            const newInventory = [...p.inventory, monster.id];
+            
+            await updateDoc(doc(db, "users", auth.currentUser.uid), {
+                money: newMoney,
+                inventory: newInventory
+            });
+            
+            window.appState.profile.money = newMoney;
+            window.appState.profile.inventory = newInventory;
+            alert(`✅ Bought ${monster.name}!`);
+            updateLobbyUI();
+            renderShop();
+        }
+
+        // --- INVENTORY SYSTEM ---
+        function openInventory() {
+            renderInventory();
+            showScreen('inventory-screen');
+        }
+
+        function renderInventory() {
+            const invGrid = document.getElementById('inventory-grid');
+            invGrid.innerHTML = "";
+            
+            if (!window.appState.profile.inventory || window.appState.profile.inventory.length === 0) {
+                invGrid.innerHTML = "<p class='text-gray-400 col-span-full text-center py-8'>No monsters collected yet!</p>";
+                return;
+            }
+            
+            // Count duplicates
+            const monsterCounts = {};
+            window.appState.profile.inventory.forEach(id => {
+                if (!monsterCounts[id]) monsterCounts[id] = 0;
+                monsterCounts[id]++;
+            });
+            
+            Object.entries(monsterCounts).forEach(([monsterId, count]) => {
+                const monster = generateMonster(parseInt(monsterId));
+                const div = document.createElement('div');
+                const rarityColor = RARITY_TIERS[monster.rarityIdx].color;
+                
+                div.className = `bg-gray-800 border-2 border-${rarityColor}-500 rounded p-3`;
+                div.innerHTML = `
+                    <img src="${monster.image}" class="w-full h-24 object-cover rounded mb-2" onerror="this.src='https://via.placeholder.com/200/1a1a2e/00ffff?text=${encodeURIComponent(monster.name)}'">
+                    <div class="font-bold text-sm truncate">${monster.name}</div>
+                    <div class="text-xs text-${rarityColor}-300 font-bold">${monster.rarity}</div>
+                    <div class="text-xs mt-1">ATK: ${monster.atk}</div>
+                    <div class="text-xs">HP: ${monster.hp}</div>
+                    <div class="bg-yellow-700 px-2 py-1 rounded text-xs font-bold text-center my-2">💰 $${monster.price}</div>
+                    <div class="bg-blue-600 px-2 py-1 rounded text-xs font-bold text-center">x${count}</div>
+                `;
+                invGrid.appendChild(div);
+            });
+        }
+
+        // --- LEADERBOARD ---
+        function openLeaderboard() {
+            loadLeaderboard();
+            showScreen('leaderboard-screen');
+        }
+
+        async function loadLeaderboard() {
+            const q = query(collection(db, "users"), orderBy("wins", "desc"), limit(10));
+            onSnapshot(q, (snap) => {
+                const leaderList = document.getElementById('leaderboard-list');
+                leaderList.innerHTML = "";
+                
+                let rank = 1;
+                snap.forEach(doc => {
+                    const user = doc.data();
+                    const li = document.createElement('li');
+                    li.className = "flex justify-between items-center bg-gray-700 p-3 rounded mb-2 hover:bg-gray-600";
+                    li.innerHTML = `
+                        <span class="font-bold text-lg">#${rank} ${user.username}</span>
+                        <div>
+                            <span class="bg-blue-600 px-3 py-1 rounded mr-2">Lvl ${user.level}</span>
+                            <span class="bg-yellow-600 px-3 py-1 rounded">${user.wins || 0} Wins</span>
+                        </div>
+                    `;
+                    leaderList.appendChild(li);
+                    rank++;
+                });
+            });
+        }
+
+        // --- Search & Chat ---
+        const btnSearch = document.getElementById('btn-search');
+        const searchInput = document.getElementById('search-input');
+        const searchResults = document.getElementById('search-results');
+
+        btnSearch.onclick = async () => {
+            const qActual = query(collection(db, "users"), where("username", ">=", searchInput.value), where("username", "<=", searchInput.value + '\uf8ff'));
+            onSnapshot(qActual, (snap) => {
+                searchResults.innerHTML = "";
+                snap.forEach(doc => {
+                    const u = doc.data();
+                    if (u.uid === auth.currentUser.uid) return;
+                    const div = document.createElement('div');
+                    div.className = "flex justify-between items-center bg-gray-700 p-2 rounded";
+                    div.innerHTML = `<span>${u.username} (Lvl ${u.level})</span> <button class="bg-blue-500 px-2 py-1 rounded text-xs">Chat</button>`;
+                    div.onclick = () => startChat(u);
+                    searchResults.appendChild(div);
+                });
+            });
+        };
+
+        // --- Battle Request System ---
+        const btnBattleRequest = document.getElementById('btn-battle-request');
+        btnBattleRequest.onclick = async () => {
+            if (!window.appState.currentChat) return;
+            const chatId = [auth.currentUser.uid, window.appState.currentChat.uid].sort().join('_');
+            await addDoc(collection(db, "chats", chatId, "messages"), {
+                sender: auth.currentUser.uid,
+                text: "⚔️ I CHALLENGE YOU TO A BATTLE!",
+                type: "battle_request",
+                timestamp: serverTimestamp()
+            });
+        };
+
+        function listenForMessages() {
+            // In a real app, we'd listen for any message with type 'battle_request'
+        }
+
+        async function acceptBattle(otherUid) {
+            const battleId = [auth.currentUser.uid, otherUid].sort().join('_');
+            const battleData = {
+                players: [auth.currentUser.uid, otherUid],
+                status: "active",
+                turn: otherUid,
+                p1: { uid: auth.currentUser.uid, hp: 8000, field: [], hand: getRandomHand(), domainUsed: false },
+                p2: { uid: otherUid, hp: 8000, field: [], hand: getRandomHand(), domainUsed: false },
+                log: ["Battle started!"]
+            };
+            await setDoc(doc(db, "battles", battleId), battleData);
+            startBattleUI(battleId);
+        }
+
+        function getRandomHand() {
+            return [
+                generateMonster(Math.floor(Math.random() * 500) + 1),
+                generateMonster(Math.floor(Math.random() * 500) + 1),
+                generateMonster(Math.floor(Math.random() * 500) + 1),
+                generateMonster(Math.floor(Math.random() * 500) + 1),
+                generateMonster(Math.floor(Math.random() * 500) + 1)
+            ];
+        }
+
+        function startBattleUI(battleId) {
+            showScreen('battle-screen');
+            onSnapshot(doc(db, "battles", battleId), (snap) => {
+                if (!snap.exists()) return;
+                const data = snap.data();
+                window.appState.currentBattle = data;
+                renderBattle(data);
+            });
+        }
+
+        function renderBattle(data) {
+            const isP1 = data.players[0] === auth.currentUser.uid;
+            const me = isP1 ? data.p1 : data.p2;
+            const opp = isP1 ? data.p2 : data.p1;
+
+            document.getElementById('your-name').innerText = `${window.appState.profile.username} (HP: ${me.hp})`;
+            document.getElementById('opp-name').innerText = `Opponent (HP: ${opp.hp})`;
+            
+            const yourField = document.getElementById('your-field');
+            yourField.innerHTML = "";
+            me.field.forEach(m => {
+                const card = createCardUI(m, true);
+                yourField.appendChild(card);
+            });
+
+            const oppField = document.getElementById('opp-field');
+            oppField.innerHTML = "";
+            opp.field.forEach(m => {
+                const card = createCardUI(m, false);
+                oppField.appendChild(card);
+            });
+
+            const handDiv = document.getElementById('player-hand');
+            handDiv.innerHTML = "";
+            me.hand.forEach((m, idx) => {
+                const card = createCardUI(m, true, true, idx);
+                handDiv.appendChild(card);
+            });
+
+            const logDiv = document.getElementById('battle-log');
+            logDiv.innerHTML = data.log.slice(-5).join("<br>");
+        }
+
+        function createCardUI(m, isMine, inHand = false, idx = null) {
+            const div = document.createElement('div');
+            div.className = `monster-card w-24 bg-gray-800 border ${m.type === 'attack' ? 'border-red-500' : 'border-blue-500'} rounded p-1 text-[10px] cursor-pointer`;
+            div.innerHTML = `
+                <img src="${m.image}" class="w-full h-12 object-cover rounded mb-1" onerror="this.src='https://via.placeholder.com/100/1a1a2e/00ffff?text=${encodeURIComponent(m.name)}'">
+                <div class="font-bold truncate">${m.name}</div>
+                <div>ATK: ${m.atk}</div>
+                <div class="text-gray-400">${m.type}</div>
+            `;
+            if (inHand && isMine) {
+                div.onclick = () => summonMonster(m, idx);
+            } else if (!inHand && isMine) {
+                div.onclick = () => attackWithMonster(m);
+            }
+            return div;
+        }
+
+        async function summonMonster(monster, idx) {
+            const b = window.appState.currentBattle;
+            if (b.turn !== auth.currentUser.uid) return alert("Not your turn!");
+            const isP1 = b.players[0] === auth.currentUser.uid;
+            const meKey = isP1 ? "p1" : "p2";
+            
+            if (b[meKey].field.length >= 2 && monster.type === 'spell') {
+                if (confirm("Fusion Summon using 2 monsters on field?")) {
+                    const fusionMonster = generateMonster(999);
+                    fusionMonster.name = "ULTIMATE FUSION";
+                    fusionMonster.atk = 5000;
+                    const newField = [fusionMonster];
+                    const newHand = b[meKey].hand.filter((_, i) => i !== idx);
+                    const updates = {};
+                    updates[`${meKey}.field`] = newField;
+                    updates[`${meKey}.hand`] = newHand;
+                    updates.log = arrayUnion(`${window.appState.profile.username} performed a FUSION SUMMON!`);
+                    await updateDoc(doc(db, "battles", [b.players[0], b.players[1]].sort().join('_')), updates);
+                    return;
+                }
+            }
+
+            if (b[meKey].field.length >= 5) return alert("Field full!");
+
+            const newField = [...b[meKey].field, monster];
+            const newHand = b[meKey].hand.filter((_, i) => i !== idx);
+            
+            const updates = {};
+            updates[`${meKey}.field`] = newField;
+            updates[`${meKey}.hand`] = newHand;
+            updates.log = arrayUnion(`${window.appState.profile.username} summoned ${monster.name}!`);
+
+            await updateDoc(doc(db, "battles", [b.players[0], b.players[1]].sort().join('_')), updates);
+        }
+
+        async function attackWithMonster(monster) {
+            const b = window.appState.currentBattle;
+            if (b.turn !== auth.currentUser.uid) return alert("Not your turn!");
+            const isP1 = b.players[0] === auth.currentUser.uid;
+            const meKey = isP1 ? "p1" : "p2";
+            const oppKey = isP1 ? "p2" : "p1";
+            
+            const updates = {};
+            if (b[oppKey].field.length > 0) {
+                const target = b[oppKey].field[0];
+                updates[`${oppKey}.field`] = b[oppKey].field.slice(1);
+                updates.log = arrayUnion(`${monster.name} destroyed ${target.name}!`);
+            } else {
+                updates[`${oppKey}.hp`] = Math.max(0, b[oppKey].hp - monster.atk);
+                updates.log = arrayUnion(`${monster.name} attacked directly for ${monster.atk}!`);
+            }
+            
+            await updateDoc(doc(db, "battles", [b.players[0], b.players[1]].sort().join('_')), updates);
+        }
+
+        document.getElementById('btn-end-turn').onclick = async () => {
+            const b = window.appState.currentBattle;
+            if (b.turn !== auth.currentUser.uid) return;
+            const otherPlayer = b.players.find(id => id !== auth.currentUser.uid);
+            await updateDoc(doc(db, "battles", [b.players[0], b.players[1]].sort().join('_')), {
+                turn: otherPlayer,
+                log: arrayUnion(`--- ${window.appState.profile.username} ended turn ---`)
+            });
+        };
+
+        document.getElementById('btn-domain-expansion').onclick = async () => {
+            const b = window.appState.currentBattle;
+            const isP1 = b.players[0] === auth.currentUser.uid;
+            const meKey = isP1 ? "p1" : "p2";
+            
+            if (b[meKey].domainUsed) return alert("Domain already used this battle!");
+            
+            const now = Date.now();
+            if (now - window.appState.profile.lastDomainUse < 24 * 60 * 60 * 1000) {
+                return alert("Domain on cooldown! Wait 24hrs.");
+            }
+
+            const domain = window.appState.profile.domain;
+            const updates = {};
+            updates[`${meKey}.domainUsed`] = true;
+            updates.log = arrayUnion(`🌟 DOMAIN EXPANSION: ${domain.name}!`);
+            const buffedField = b[meKey].field.map(m => ({...m, atk: m.atk * 2}));
+            updates[`${meKey}.field`] = buffedField;
+            
+            await updateDoc(doc(db, "battles", [b.players[0], b.players[1]].sort().join('_')), updates);
+            await updateDoc(doc(db, "users", auth.currentUser.uid), { lastDomainUse: now });
+        };
+
+        // Simplified Chat Logic
+        async function startChat(otherUser) {
+            window.appState.currentChat = otherUser;
+            document.getElementById('chat-with').innerText = `Chatting with ${otherUser.username}`;
+            showScreen('chat-screen');
+            loadMessages(otherUser.uid);
+        }
+
+        function loadMessages(otherUid) {
+            const chatId = [auth.currentUser.uid, otherUid].sort().join('_');
+            const q = query(collection(db, "chats", chatId, "messages"), orderBy("timestamp", "asc"));
+            onSnapshot(q, (snap) => {
+                const msgDiv = document.getElementById('chat-messages');
+                msgDiv.innerHTML = "";
+                snap.forEach(doc => {
+                    const data = doc.data();
+                    const item = document.createElement('div');
+                    item.className = `p-2 rounded ${data.sender === auth.currentUser.uid ? 'bg-blue-900 ml-auto' : 'bg-gray-700'} max-w-[80%] flex flex-col`;
+                    
+                    if (data.type === 'battle_request') {
+                        item.innerHTML = `
+                            <span class="font-bold text-red-400">${data.text}</span>
+                            ${data.sender !== auth.currentUser.uid ? `<button onclick="acceptBattle('${data.sender}')" class="bg-red-600 mt-2 p-1 rounded text-xs">ACCEPT CHALLENGE</button>` : ''}
+                        `;
+                    } else {
+                        item.innerText = data.text;
+                    }
+                    msgDiv.appendChild(item);
+                });
+                msgDiv.scrollTop = msgDiv.scrollHeight;
+            });
+        }
+
+        window.acceptBattle = acceptBattle;
+        document.getElementById('btn-back-lobby').onclick = () => showScreen('lobby-screen');
+        document.getElementById('btn-back-shop').onclick = () => showScreen('lobby-screen');
+        document.getElementById('btn-back-inventory').onclick = () => showScreen('lobby-screen');
+        document.getElementById('btn-back-leaderboard').onclick = () => showScreen('lobby-screen');
+        document.getElementById('btn-surrender').onclick = () => {
+            if (confirm("Surrender battle?")) showScreen('lobby-screen');
+        };
+
+        document.getElementById('btn-send-chat').onclick = async () => {
+            const text = document.getElementById('chat-input').value;
+            if (!text || !window.appState.currentChat) return;
+            const chatId = [auth.currentUser.uid, window.appState.currentChat.uid].sort().join('_');
+            await addDoc(collection(db, "chats", chatId, "messages"), {
+                sender: auth.currentUser.uid,
+                text: text,
+                timestamp: serverTimestamp()
+            });
+            document.getElementById('chat-input').value = "";
+        };
+
+        window.openShop = openShop;
+        window.openInventory = openInventory;
+        window.openLeaderboard = openLeaderboard;
+
+    </script>
+    <style>
+        .monster-card { transition: transform 0.2s; }
+        .monster-card:hover { transform: scale(1.05); }
+        .bg-mythic { background: radial-gradient(circle, #1a1a2e 0%, #16213e 100%); }
+    </style>
+</head>
+<body class="bg-mythic text-white min-h-screen">
+    <!-- Auth Screen -->
+    <div id="auth-screen" class="flex items-center justify-center min-h-screen">
+        <div class="bg-gray-800 p-8 rounded-lg shadow-xl w-96">
+            <h1 class="text-3xl font-bold mb-6 text-center text-blue-400">MYTHIC</h1>
+            <div id="auth-form">
+                <input id="auth-email" type="email" placeholder="Email" class="w-full p-2 mb-4 rounded bg-gray-700 border border-gray-600">
+                <input id="auth-password" type="password" placeholder="Password" class="w-full p-2 mb-4 rounded bg-gray-700 border border-gray-600">
+                <button id="btn-login" class="w-full bg-blue-600 hover:bg-blue-700 p-2 rounded mb-2 font-bold">Login</button>
+                <button id="btn-signup" class="w-full bg-green-600 hover:bg-green-700 p-2 rounded font-bold">Sign Up</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Lobby Screen -->
+    <div id="lobby-screen" class="hidden p-4">
+        <div class="max-w-6xl mx-auto">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-2xl font-bold">Welcome, <span id="player-name">Player</span></h2>
+                <button id="btn-logout" class="bg-red-600 px-4 py-2 rounded">Logout</button>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                <div class="bg-gray-800 p-4 rounded-lg">
+                    <h3 class="text-xl font-bold mb-4 border-b border-gray-700 pb-2">Profile</h3>
+                    <p>Level: <span id="p-level">1</span></p>
+                    <p>Money: $<span id="p-money">0</span></p>
+                    <p class="mt-2">Wins: <span id="p-wins">0</span></p>
+                    <p class="mt-2 text-blue-300">Domain: <span id="p-domain">None</span></p>
+                </div>
+                <div class="bg-gradient-to-br from-green-900 to-green-700 p-4 rounded-lg cursor-pointer hover:scale-105 transition" onclick="openShop()">
+                    <h3 class="text-xl font-bold">🛍️ SHOP</h3>
+                    <p class="text-sm mt-2">Buy Monsters & Spells</p>
+                </div>
+                <div class="bg-gradient-to-br from-purple-900 to-purple-700 p-4 rounded-lg cursor-pointer hover:scale-105 transition" onclick="openInventory()">
+                    <h3 class="text-xl font-bold">📦 INVENTORY</h3>
+                    <p class="text-sm mt-2">View Your Collection</p>
+                </div>
+                <div class="bg-gradient-to-br from-yellow-900 to-yellow-700 p-4 rounded-lg cursor-pointer hover:scale-105 transition" onclick="openLeaderboard()">
+                    <h3 class="text-xl font-bold">🏆 LEADERBOARD</h3>
+                    <p class="text-sm mt-2">Top Players</p>
+                </div>
+            </div>
+            <div class="md:col-span-4 bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-xl font-bold mb-4 border-b border-gray-700 pb-2">Search Players</h3>
+                <div class="flex gap-2 mb-4">
+                    <input id="search-input" type="text" placeholder="Username..." class="flex-1 p-2 rounded bg-gray-700">
+                    <button id="btn-search" class="bg-blue-600 px-4 py-2 rounded">Search</button>
+                </div>
+                <div id="search-results" class="space-y-2"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Shop Screen -->
+    <div id="shop-screen" class="hidden p-4">
+        <div class="max-w-6xl mx-auto">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-3xl font-bold">🛍️ MONSTER SHOP</h2>
+                <div class="flex gap-4">
+                    <div class="bg-yellow-600 px-6 py-2 rounded font-bold">💰 $<span id="shop-money">0</span></div>
+                    <button id="btn-back-shop" class="bg-red-600 px-4 py-2 rounded">Back</button>
+                </div>
+            </div>
+            <div id="shop-grid" class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4"></div>
+        </div>
+    </div>
+
+    <!-- Inventory Screen -->
+    <div id="inventory-screen" class="hidden p-4">
+        <div class="max-w-6xl mx-auto">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-3xl font-bold">📦 YOUR INVENTORY</h2>
+                <button id="btn-back-inventory" class="bg-red-600 px-4 py-2 rounded">Back</button>
+            </div>
+            <div id="inventory-grid" class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4"></div>
+        </div>
+    </div>
+
+    <!-- Leaderboard Screen -->
+    <div id="leaderboard-screen" class="hidden p-4">
+        <div class="max-w-2xl mx-auto">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-3xl font-bold">🏆 LEADERBOARD</h2>
+                <button id="btn-back-leaderboard" class="bg-red-600 px-4 py-2 rounded">Back</button>
+            </div>
+            <div class="bg-gray-800 p-6 rounded-lg">
+                <ul id="leaderboard-list"></ul>
+            </div>
+        </div>
+    </div>
+
+    <!-- Chat/Battle Screen -->
+    <div id="chat-screen" class="hidden h-screen flex flex-col p-4">
+        <div class="flex justify-between items-center mb-2">
+            <button id="btn-back-lobby" class="text-blue-400">&larr; Back</button>
+            <h2 id="chat-with" class="text-xl font-bold">Chatting with...</h2>
+            <button id="btn-battle-request" class="bg-red-600 px-4 py-1 rounded font-bold animate-pulse">BATTLE!</button>
+        </div>
+        <div id="chat-messages" class="flex-1 bg-gray-900 rounded p-4 overflow-y-auto mb-4 space-y-2"></div>
+        <div class="flex gap-2">
+            <input id="chat-input" type="text" placeholder="Type a message..." class="flex-1 p-2 rounded bg-gray-700">
+            <button id="btn-send-chat" class="bg-blue-600 px-6 py-2 rounded">Send</button>
+        </div>
+    </div>
+
+    <!-- Battle Screen (Overlay or Separate) -->
+    <div id="battle-screen" class="hidden fixed inset-0 bg-black bg-opacity-90 z-50 p-4 flex flex-col">
+        <div class="flex justify-between items-center mb-4">
+            <div class="text-red-500 font-bold">OPPONENT: <span id="opp-name">...</span></div>
+            <div class="text-blue-500 font-bold">YOU: <span id="your-name">...</span></div>
+        </div>
+        <div class="flex-1 grid grid-cols-2 gap-4">
+            <div id="opp-field" class="border border-red-900 rounded p-2 flex flex-wrap gap-2 content-start"></div>
+            <div id="your-field" class="border border-blue-900 rounded p-2 flex flex-wrap gap-2 content-end"></div>
+        </div>
+        <div class="h-48 bg-gray-800 rounded p-2 flex flex-col">
+            <div id="battle-log" class="flex-1 overflow-y-auto text-sm mb-2 text-gray-400"></div>
+            <div class="flex gap-2 overflow-x-auto pb-2" id="player-hand"></div>
+            <div class="flex justify-between items-center">
+                <button id="btn-domain-expansion" class="bg-purple-600 px-4 py-2 rounded font-bold">DOMAIN EXPANSION</button>
+                <div class="flex gap-2">
+                    <button id="btn-end-turn" class="bg-yellow-600 px-4 py-2 rounded font-bold">END TURN</button>
+                    <button id="btn-surrender" class="bg-gray-600 px-4 py-2 rounded">Surrender</button>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
